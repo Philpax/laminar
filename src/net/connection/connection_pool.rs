@@ -31,7 +31,10 @@ impl ConnectionPool {
             .map_err(|error| NetworkError::poisoned_connection_error(error.description()))?;
 
         if lock.contains_key(addr) {
-            return Ok(lock.get(addr).unwrap().clone());
+            match lock.get(addr) {
+                Some(connection) => { Ok(connection.clone()) },
+                None => { Err(NetworkErrorKind::ConnectionPoolError(String::from("Could not get connection from connection pool")).into()) },
+            }
         }else {
             drop(lock);
 
