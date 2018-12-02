@@ -1,7 +1,8 @@
 use super::ConnectionPool;
-use error::{NetworkError, NetworkErrorKind, NetworkResult};
+use error::{NetworkError, NetworkResult};
 use events::Event;
 
+use std::sync::atomic::*;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -19,6 +20,7 @@ pub const TIMEOUT_POLL_INTERVAL: u64 = 1;
 /// 3. Check if the last time we have heard from them (received a packet from them) is greater than the amount of time considered to be a timeout.
 /// 4. If they have timed out, send a notification up the stack.
 pub struct TimeoutThread {
+    alive: Arc<AtomicBool>,
     poll_interval: Duration,
     timeout_check_thread: Option<thread::JoinHandle<()>>,
     sender: Sender<Event>,
@@ -33,6 +35,7 @@ impl TimeoutThread {
         let poll_interval = Duration::from_secs(TIMEOUT_POLL_INTERVAL);
 
         TimeoutThread {
+            alive: Arc::new(AtomicBool::new(true)),
             poll_interval,
             timeout_check_thread: None,
             sender: events_sender,
@@ -49,7 +52,12 @@ impl TimeoutThread {
         let sender = self.sender.clone();
         let (tx, rx) = channel();
 
+        let alive = self.alive.clone();
         let thread = thread::spawn(move || loop {
+            if !alive.load(Ordering::Relaxed) {
+                break;
+            }
+
             match connection_pool.check_for_timeouts(poll_interval, &sender) {
                 Ok(timed_out_clients) => {
                     for timed_out_client in timed_out_clients {
@@ -70,16 +78,17 @@ impl TimeoutThread {
         self.timeout_check_thread = Some(thread);
         Ok(rx)
     }
+}
 
-    /// Stops the thread, note that this is an blocking call until the timeout thread fails.
-    #[allow(dead_code)]
-    pub fn stop(self) -> NetworkResult<()> {
-        let handler = self.timeout_check_thread;
-        if let Some(handle) = handler {
-            handle
+impl Drop for TimeoutThread {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+        if self.timeout_check_thread.is_some() {
+            self.timeout_check_thread
+                .take()
+                .expect("failed to take value out of thread")
                 .join()
-                .map_err(|_| NetworkErrorKind::JoiningThreadFailed)?;
+                .expect("failed to join on thread");
         }
-        Ok(())
     }
 }
